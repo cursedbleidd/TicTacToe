@@ -1,0 +1,17 @@
+
+*.exe
+*.recipe
+*.ilk
+*.log
+*.pdb
+*.obj
+*.tlog
+*.idb
+*.iobj
+*.ipdb
+*.sln
+*.vcxproj
+*.filters
+*.user
+Debug/TicTacToe.vcxproj.FileListAbsolute.txt
+Release/TicTacToe.vcxproj.FileListAbsolute.txt
