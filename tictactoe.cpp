@@ -12,6 +12,10 @@
 #include <stdlib.h>
 #include <tchar.h>
 #include <windows.h>
+#include <wingdi.h>
+#include <winuser.h>
+#include <conio.h>
+#pragma comment(lib, "Msimg32.lib")
 
 #define KEY_SHIFTED     0x8000
 #define KEY_TOGGLED     0x0001
@@ -21,9 +25,15 @@ const TCHAR szWinName[] = _T("TicTacToe");
 const TCHAR szField[] = _T("Local\\field");
 HWND hwnd;               /* This is the handle for our window */
 HBRUSH hBrush;           /* Current brush */
+HANDLE bckGrnThread;
+HANDLE PaintThread;
+DWORD ThreadID[2];
+DWORD ExitCode[2];
+volatile bool bContinue = true;
 
 COLORREF line = 0x000000FF;
-COLORREF bckGrn = 0x00FF0000;
+COLORREF bckGrn = 0x00FF5555;
+COLORREF nbckGrn;
 COLORREF cross = 0x0000FFFF;
 COLORREF ellipse = 0x00FFFF00;
 
@@ -35,6 +45,7 @@ int HEIGHT = 240;
 int WIDTH = 320;
 
 LPTSTR FIELD; // shared memory
+int fieldN = 0;
 
 const int IDENT = 10;  // padding for cell
 const int CLRCNG = 15; // color change for field
@@ -43,6 +54,28 @@ const int X = 1; // cross to matrix
 const int O = 2; // circle to matrix
 
 UINT FieldUpdate;
+bool threadSuspended = false;
+
+void HorizontalGradient(HDC hdc, const RECT& lprect,
+    COLORREF rgbTop, COLORREF rgbBottom)
+{
+    GRADIENT_RECT gradientRect = { 0, 1 };
+    TRIVERTEX triVertext[2] = {
+        lprect.left,
+        lprect.top,
+        GetRValue(rgbTop) << 8,
+        GetGValue(rgbTop) << 8,
+        GetBValue(rgbTop) << 8,
+        0x0000,
+        lprect.right,
+        lprect.bottom,
+        GetRValue(rgbBottom) << 8,
+        GetGValue(rgbBottom) << 8,
+        GetBValue(rgbBottom) << 8,
+        0x0000
+    };
+    GradientFill(hdc, triVertext, 2, &gradientRect, 1, GRADIENT_FILL_RECT_H);
+}
 
 /* Runs Notepad */
 void RunNotepad()
@@ -109,6 +142,47 @@ void PaintLines(HDC hdc, int x, int y)
     }
     DeleteObject(hPen);
 }
+
+DWORD WINAPI BackgroundThread(LPVOID t)
+{
+    while (bContinue)
+    {
+        byte r = GetRValue(bckGrn), g = GetGValue(bckGrn), b = GetBValue(bckGrn); // calculates color in [85; 255]
+        bool r255 = r == 255, b255 = b == 255, g255 = g == 255;
+        bool r0 = r == 85, b0 = b == 85, g0 = g == 85;
+        if (r255 && g0 && !b255) nbckGrn = RGB(r, g, b += 85);
+        else if (!r0 && b255 && g0) nbckGrn = RGB(r -= 85, g, b);
+        else if (b255 && r0 && !g255) nbckGrn = RGB(r, g += 85, b);
+        else if (!b0 && g255 && r0) nbckGrn = RGB(r, g, b -= 85);
+        else if (g255 && b0 && !r255) nbckGrn = RGB(r += 85, g, b);
+        else if (r255 && b0 && !g0) nbckGrn = RGB(r, g -= 85, b);
+
+        Sleep(125);
+        bckGrn = nbckGrn;
+    }
+    ExitThread(0);
+}
+
+DWORD WINAPI PaintFieldThread(LPVOID t)
+{
+
+    while (bContinue)
+    {
+        InvalidateRect(hwnd, NULL, TRUE);
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT clientRect;
+        GetClientRect(hwnd, &clientRect);
+        HorizontalGradient(hdc, clientRect, bckGrn, nbckGrn);
+        PaintLines(hdc, clientRect.right, clientRect.bottom);
+        PaintFigures(hdc, clientRect.right, clientRect.bottom);
+        EndPaint(hwnd, &ps);
+        DeleteObject(hdc);
+        Sleep(50);
+    }
+    ExitThread(0);
+}
+
 /*  This function is called by the Windows function DispatchMessage()  */
 LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -116,11 +190,11 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         InvalidateRect(hwnd, NULL, TRUE);
     switch (message)                  /* handle the messages */
     {
-    case WM_MOUSEWHEEL: /* yeah, i am insane, how could you tell? */
+    case WM_MOUSEWHEEL: // yeah, i am insane, how could you tell?
     {
         byte r = GetRValue(line), g = GetGValue(line), b = GetBValue(line);
-        boolean r255 = r == 255, b255 = b == 255, g255 = g == 255;
-        boolean r0 = r == 0, b0 = b == 0, g0 = g == 0;
+        bool r255 = r == 255, b255 = b == 255, g255 = g == 255;
+        bool r0 = r == 0, b0 = b == 0, g0 = g == 0;
         if (GET_WHEEL_DELTA_WPARAM(wParam) > 0)
         {
             if (r255 && g0 && !b255) line = RGB(r, g, b += CLRCNG);
@@ -148,14 +222,29 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             PostMessage(hwnd, WM_DESTROY, NULL, NULL); // Exit
         else if (wParam == CButton && (GetKeyState(VK_SHIFT) < 0))
             RunNotepad(); // SHIFT + C
-        else if (wParam == VK_RETURN)
+        else if (GetKeyState(VK_SPACE) < 0)
         {
-            int r = rand() % 256, g = rand() % 256, b = rand() % 256;
-            bckGrn = RGB(r, g, b);
-            HANDLE oldBrush = SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)CreateSolidBrush(bckGrn));
-            InvalidateRect(hwnd, NULL, TRUE);
-            DeleteObject(oldBrush);
+            if (!threadSuspended)
+                SuspendThread(bckGrnThread);
+            else
+                ResumeThread(bckGrnThread);
+
+            threadSuspended = !threadSuspended;
         }
+        else if (GetKeyState('1') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_IDLE);
+        else if (GetKeyState('2') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_LOWEST);
+        else if (GetKeyState('3') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_BELOW_NORMAL);
+        else if (GetKeyState('4') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_NORMAL);
+        else if (GetKeyState('5') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_ABOVE_NORMAL);
+        else if (GetKeyState('6') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_HIGHEST);
+        else if (GetKeyState('7') < 0)
+            SetThreadPriority(PaintThread, THREAD_PRIORITY_TIME_CRITICAL);
     }
     return 0;
     case WM_LBUTTONDOWN:
@@ -183,22 +272,54 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         InvalidateRect(hwnd, NULL, TRUE);
     }
     return 0;
-    case WM_PAINT:
+    case WM_CREATE:
     {
-        RECT clientRect;
-        GetClientRect(hwnd, &clientRect);
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        PaintLines(hdc, clientRect.right, clientRect.bottom);
-        PaintFigures(hdc, clientRect.right, clientRect.bottom);
-        EndPaint(hwnd, &ps);
-        DeleteObject(hdc);
+        PaintThread = CreateThread( // thread for painting
+            NULL,
+            0,
+            PaintFieldThread,
+            NULL,
+            0,
+            &ThreadID[0]
+        );
+        if (PaintThread == NULL)
+        {
+            _tprintf(_T("Could not create new thread. (%d).\n"),
+                GetLastError());
+            _getch();
+            return 1;
+        }
+        bckGrnThread = CreateThread(
+            NULL,
+            0,
+            BackgroundThread,
+            NULL,
+            0,
+            &ThreadID[1]
+        );
+        if (bckGrnThread == NULL)
+        {
+            _tprintf(_T("Could not create new thread. (%d).\n"),
+                GetLastError());
+            _getch();
+            return 1;
+        }
     }
+    return 0;
+    case WM_PAINT:
     return 0;
     case WM_DESTROY:
     {
+        bContinue = false;
         FILE* cnf;
         fopen_s(&cnf, "config.txt", "w");
+        if (cnf == NULL)
+        {
+            _tprintf(_T("Could not create config file (%d).\n"),
+                GetLastError());
+            _getch();
+            return 1;
+        }
         fprintf_s(cnf, "%d\n%d\n%d\n%d\n%d", N, WIDTH, HEIGHT, bckGrn, line);
         fclose(cnf);
     }
@@ -253,6 +374,13 @@ int main(int argc, char** argv)
     if (!isOpened && cnf == NULL)
     {
         fopen_s(&cnf, "config.txt", "w");
+        if (cnf == NULL)
+        {
+            _tprintf(_T("Could not create config file (%d).\n"),
+                GetLastError());
+            _getch();
+            return 1;
+        }
         fprintf_s(cnf, "%d\n%d\n%d\n%d\n%d", N, WIDTH, HEIGHT, bckGrn, line);
     }
     fclose(cnf);
@@ -277,7 +405,7 @@ int main(int argc, char** argv)
     }
 
     srand(time(NULL));
-    
+
     BOOL bMessageOk;
     MSG message;            /* Here message to the application are saved */
     WNDCLASS wincl = { 0 };         /* Data structure for the windowclass */
@@ -291,10 +419,6 @@ int main(int argc, char** argv)
     wincl.hInstance = hThisInstance;
     wincl.lpszClassName = szWinClass;
     wincl.lpfnWndProc = WindowProcedure;      /* This function is called by Windows */
-
-    /* Use custom brush to paint the background of the window */
-    hBrush = CreateSolidBrush(bckGrn);
-    wincl.hbrBackground = hBrush;
 
     /* Register the window class, and if it fails quit the program */
     if (!RegisterClass(&wincl))
@@ -314,7 +438,6 @@ int main(int argc, char** argv)
         hThisInstance,       /* Program Instance handler */
         NULL                 /* No Window Creation data */
     );
-
     /* Make the window visible on the screen */
     ShowWindow(hwnd, nCmdShow);
     /* Run the message loop. It will run until GetMessage() returns 0 */
@@ -339,5 +462,7 @@ int main(int argc, char** argv)
     DeleteObject(hBrush);
     UnmapViewOfFile(FIELD);
     CloseHandle(hFileMap);
+    CloseHandle(bckGrnThread);
+    CloseHandle(PaintThread);
     return 0;
 }
