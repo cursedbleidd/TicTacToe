@@ -54,7 +54,41 @@ const int X = 1; // cross to matrix
 const int O = 2; // circle to matrix
 
 UINT FieldUpdate;
+UINT CloseAll;
 bool threadSuspended = false;
+
+bool CheckRow(int y)
+{
+    bool win = true;
+    for (int x = 0; x < N && win; x++)
+        win = FIELD[y * N + x] == FIELD[N * N];
+    return win;
+}
+bool CheckColumn(int x)
+{
+    bool win = true;
+    for (int y = 0; y < N && win; y++)
+        win = FIELD[y * N + x] == FIELD[N * N];
+    return win;
+}
+bool CheckDiagonals()
+{
+    bool win1 = true, win2 = true;
+    for (int y = 0, x = 0; y < N && win1; y++, x++)
+        win1 = FIELD[y * N + x] == FIELD[N * N];
+    for (int y = 0, x = N - 1; y < N && win2; y++, x--)
+        win2 = FIELD[y * N + x] == FIELD[N * N];
+    return win1 || win2;
+}
+
+bool DrawCheck()
+{
+    bool draw = true;
+    for (int y = 0; y < N && draw; y++)
+        for (int x = 0; x < N && draw; x++)
+            draw = FIELD[y * N + x] != NULL;
+    return draw;
+}
 
 void HorizontalGradient(HDC hdc, const RECT& lprect,
     COLORREF rgbTop, COLORREF rgbBottom)
@@ -90,13 +124,27 @@ void RunNotepad()
         NULL, NULL, NULL, FALSE, 0, NULL, NULL, &sInfo, &pInfo);
 }
 
-void ClickCalc(RECT r, int xPos, int yPos, int click)
+void ClickCalc(RECT r, int xPos, int yPos)
 {
     int x = xPos / (r.right / N), y = yPos / (r.bottom / N);
-    if (FIELD[y * N + x] == NULL) FIELD[y * N + x] = click;
+    if (FIELD[y * N + x] == NULL) FIELD[y * N + x] = FIELD[N * N];
     /* FIELD = "(0*N+1),..,(0*N+N-1),*/
     /*(1*N+0),..,(1*N+N-1),*/
     /*......,((N-1)*N+N-1)"*/
+    if (CheckRow(y) || CheckColumn(x) || CheckDiagonals())
+    {
+        const int BUFF_SIZE = 50;
+        wchar_t msg[BUFF_SIZE];
+        WCHAR player = (FIELD[N * N] == X) ? 'X' : 'O';
+        _snwprintf_s(msg, BUFF_SIZE, L"%c-player won!", player);
+        MessageBox(hwnd, (LPCWSTR)msg, _T("Congratulations!"), MB_OK);
+        PostMessage(HWND_BROADCAST, CloseAll, NULL, NULL);
+    }
+    else if (DrawCheck())
+    {
+        MessageBox(hwnd, _T("Friendship won!"), _T("Draw!"), MB_OK);
+        PostMessage(HWND_BROADCAST, CloseAll, NULL, NULL);
+    }
 }
 
 void PaintCross(HDC hdc, int lX, int lY, int mX, int mY)
@@ -187,7 +235,15 @@ DWORD WINAPI PaintFieldThread(LPVOID t)
 LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == FieldUpdate)
+    {
         InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
+    if (message == CloseAll)
+    {
+        PostMessage(hwnd, WM_DESTROY, NULL, NULL);
+        return 0;
+    }
     switch (message)                  /* handle the messages */
     {
     case WM_MOUSEWHEEL: // yeah, i am insane, how could you tell?
@@ -248,18 +304,22 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     }
     return 0;
     case WM_LBUTTONDOWN:
-    {
-        RECT clientRect;
-        GetClientRect(hwnd, &clientRect);
-        ClickCalc(clientRect, LOWORD(lParam), HIWORD(lParam), X);
-        PostMessage(HWND_BROADCAST, FieldUpdate, 0, 0);
-    }
-    return 0;
     case WM_RBUTTONDOWN:
     {
+        TCHAR result = (message == WM_LBUTTONDOWN) ? X : O;
+        if (result != FIELD[N * N])
+        {
+            const int BUFF_SIZE = 50;
+            wchar_t msg[BUFF_SIZE];
+            WCHAR player = (FIELD[N * N] == X) ? 'X' : 'O';
+            _snwprintf_s(msg, BUFF_SIZE, L"It's %c-player turn to move!", player);
+            MessageBox(hwnd, (LPCWSTR)msg, _T(""), MB_OK | MB_ICONSTOP);
+            return 0;
+        }
         RECT clientRect;
         GetClientRect(hwnd, &clientRect);
-        ClickCalc(clientRect, LOWORD(lParam), HIWORD(lParam), O);
+        ClickCalc(clientRect, LOWORD(lParam), HIWORD(lParam));
+        FIELD[N * N] = (result == X) ? O : X;
         PostMessage(HWND_BROADCAST, FieldUpdate, 0, 0);
     }
     return 0;
@@ -333,7 +393,8 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 int main(int argc, char** argv)
 {
-    FieldUpdate = RegisterWindowMessage(_T("MSG"));
+    FieldUpdate = RegisterWindowMessage(_T("FieldUpdate"));
+    CloseAll = RegisterWindowMessage(_T("CloseAll"));
 
     BOOL isInput = (argc > 1 && atoi(argv[1]) > 0);
     BOOL isOpened = TRUE; // opened filemapping or not
@@ -352,7 +413,7 @@ int main(int argc, char** argv)
             NULL,
             PAGE_READWRITE,
             0,
-            N * N,
+            N * N + sizeof(TCHAR),
             szField
         );
         if (hFileMap == NULL)
@@ -391,7 +452,7 @@ int main(int argc, char** argv)
         FILE_MAP_ALL_ACCESS,
         0,
         0,
-        N * N
+        N * N + sizeof(TCHAR)
     );
     if (FIELD == NULL)
     {
@@ -403,7 +464,7 @@ int main(int argc, char** argv)
 
         return 1;
     }
-
+    FIELD[N * N] = X;
     srand(time(NULL));
 
     BOOL bMessageOk;
